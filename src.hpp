@@ -67,8 +67,16 @@ private:
 
     bool is_safe_velocity(const Vec &v_candidate) const {
         int n = monitor->get_robot_number();
+        double speed_i = v_candidate.norm();
         for (int j = 0; j < n; ++j) {
             if (j == id) continue;
+            Vec pos_j = monitor->get_pos_cur(j);
+            Vec v_j = monitor->get_v_cur(j);
+            double r_j = monitor->get_r(j);
+            Vec delta_pos = pos_cur - pos_j;
+            double dist = delta_pos.norm();
+            double reach = (speed_i + v_j.norm()) * TIME_INTERVAL + (r + r_j) + 1e-8;
+            if (dist > reach) continue; // broad-phase prune: too far to collide this interval
             if (will_collide_with(v_candidate, j)) return false;
         }
         return true;
@@ -99,45 +107,24 @@ public:
             v_desired = v_desired * 0.9;
         }
 
-        // Directional sampling with per-direction scaling. Favor target direction, then small rotations.
-        const double angles[] = {0, 0.35, -0.35, 0.7, -0.7, 1.2, -1.2, 1.57, -1.57};
-        Vec dir = v_desired.norm() > 1e-9 ? v_desired.normalize() : to_tar.normalize();
+        // Single-direction safe scaling via binary search for alpha in [0,1]
+        // Quick accept if full speed looks safe
+        if (is_safe_velocity(v_desired)) {
+            return v_desired;
+        }
 
+        double lo = 0.0, hi = 1.0;
         Vec best = Vec();
-        double best_speed = 0.0;
-
-        // Yielding rule: if we’re in a potential head-on, reduce target speed slightly based on id
-        // Check nearest conflicting robot roughly along line to target
-        int n = monitor->get_robot_number();
-        for (double ang : angles) {
-            Vec d = dir.rotate(ang);
-            // Try speeds from high to low using binary search
-            double lo = 0.0, hi = v_max;
-            Vec candidate = Vec();
-            for (int it = 0; it < 35; ++it) {
-                double mid = (lo + hi) * 0.5;
-                Vec v_try = d * mid;
-                if (is_safe_velocity(v_try)) {
-                    candidate = v_try;
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            double cand_speed = candidate.norm();
-            if (cand_speed > best_speed + 1e-9) {
-                best_speed = cand_speed;
-                best = candidate;
+        for (int it = 0; it < 34; ++it) {
+            double mid = (lo + hi) * 0.5;
+            Vec v_try = v_desired * mid;
+            if (is_safe_velocity(v_try)) {
+                best = v_try;
+                lo = mid;
+            } else {
+                hi = mid;
             }
         }
-
-        // If still zero (blocked), apply gentle slowdown to avoid deadlock and let others move
-        if (best.norm() < 1e-9) {
-            // Slight backoff if warning in last round or low id to promote yielding
-            double scale = monitor->get_warning() ? 0.0 : 0.2;
-            return dir * (v_max * scale);
-        }
-
         return best;
     }
 };
