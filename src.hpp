@@ -99,30 +99,43 @@ public:
             v_desired = v_desired * 0.9;
         }
 
-        // Try to find a safe scaling factor alpha in [0,1]
-        // such that no predicted collisions occur (assuming others keep current v)
-        double lo = 0.0, hi = 1.0;
+        // Directional sampling with per-direction scaling. Favor target direction, then small rotations.
+        const double angles[] = {0, 0.35, -0.35, 0.7, -0.7, 1.2, -1.2, 1.57, -1.57};
+        Vec dir = v_desired.norm() > 1e-9 ? v_desired.normalize() : to_tar.normalize();
+
         Vec best = Vec();
-        // If zero velocity is unsafe (shouldn't be), return zero early
-        if (!is_safe_velocity(best)) {
-            return Vec();
-        }
+        double best_speed = 0.0;
 
-        // Quick accept if full speed looks safe
-        if (is_safe_velocity(v_desired)) {
-            return v_desired;
-        }
-
-        // Binary search for maximum safe alpha
-        for (int it = 0; it < 40; ++it) {
-            double mid = (lo + hi) * 0.5;
-            Vec v_try = v_desired * mid;
-            if (is_safe_velocity(v_try)) {
-                best = v_try;
-                lo = mid;
-            } else {
-                hi = mid;
+        // Yielding rule: if we’re in a potential head-on, reduce target speed slightly based on id
+        // Check nearest conflicting robot roughly along line to target
+        int n = monitor->get_robot_number();
+        for (double ang : angles) {
+            Vec d = dir.rotate(ang);
+            // Try speeds from high to low using binary search
+            double lo = 0.0, hi = v_max;
+            Vec candidate = Vec();
+            for (int it = 0; it < 35; ++it) {
+                double mid = (lo + hi) * 0.5;
+                Vec v_try = d * mid;
+                if (is_safe_velocity(v_try)) {
+                    candidate = v_try;
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
             }
+            double cand_speed = candidate.norm();
+            if (cand_speed > best_speed + 1e-9) {
+                best_speed = cand_speed;
+                best = candidate;
+            }
+        }
+
+        // If still zero (blocked), apply gentle slowdown to avoid deadlock and let others move
+        if (best.norm() < 1e-9) {
+            // Slight backoff if warning in last round or low id to promote yielding
+            double scale = monitor->get_warning() ? 0.0 : 0.2;
+            return dir * (v_max * scale);
         }
 
         return best;
@@ -131,4 +144,3 @@ public:
 
 
 #endif //PPCA_SRC_HPP
-
